@@ -7,6 +7,21 @@ Using unofficial Heltec LoRa Library found at: https://github.com/ropg/Heltec_ES
 #define HELTEC_POWER_BUTTON   // must be before "#include <heltec_unofficial.h>"
 #include <heltec_unofficial.h>
 #include <map>
+#include <WiFi.h>
+#include <MySQL_Connection.h>
+#include <MySQL_Cursor.h>
+//Set your SSID and Password Here:
+const char* ssid = "BT-9FF9SJ";
+const char* password = "MtJKQTaF7RhfcX";
+bool WifiEnabled = 1; //Disable wifi here
+
+//Define MySQL login and password
+WiFiClient client;
+MySQL_Connection conn((Client*)&client);
+bool SQL_connection_status;
+char user[] = "lora";
+char pass[] = "123";
+char db[] = "loradata";
 // Pause between transmited packets in seconds.
 // Set to zero to only transmit a packet when pressing the user button
 // Will not exceed 1% duty cycle, even if you set a lower value.
@@ -58,6 +73,7 @@ const int MAX_HOPS = 1;
 unsigned long lastTimeoutCheck = 0;
 unsigned long BROADCAST_TIME = 60000;//1 minute    300000; //5 minutes
 unsigned long lastBroadcast = 0;
+unsigned long lastSQLBroadcast =0;
 bool firstLoop;
 
 
@@ -93,6 +109,7 @@ void setup() {
   #endif
   */
 
+  
   display.init();
   display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);  
@@ -113,6 +130,41 @@ void setup() {
   RADIOLIB_OR_HALT(radio.setOutputPower(TRANSMIT_POWER));
   delay(1000);
   display.cls();
+
+  if (WifiEnabled){
+    // Connect to WiFi
+    both.print("Connecting to Wifi...\n");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      both.print(".");
+    }
+    
+    if (WiFi.status() == WL_CONNECTED){
+      both.print("\nConnected to Wifi\n");  
+      // Connect to MySQL
+      both.print("Connecting to MySQL Server...");
+      IPAddress server_addr(192,168,1,148);  // IP of the MySQL *server* here
+
+      delay(500);
+      if (conn.connect(server_addr, 3306, user, pass)) {
+        delay(1000);
+        both.print("Connected to MySQL\n");
+        //Create a cursor
+        MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+        SQL_connection_status = true;
+        delay(2000);
+
+      } else {
+        both.print("Connection failed.\n");
+        SQL_connection_status = false;
+        delay(3000);
+      }
+      
+    }
+  } 
+  delay(2000);
+  clearDisplay();
   //Initialise Temperature
   temp = heltec_temperature();
   both.printf("Current Temp: %.1f °C\n", temp);
@@ -149,6 +201,9 @@ void loop() {
 
   if(firstLoop){
     broadcastNode();
+    if (WifiEnabled && SQL_connection_status){
+      broadcastSQL();
+    }
     firstLoop=false;
   }
 
@@ -156,6 +211,11 @@ void loop() {
   if (millis() - lastBroadcast > BROADCAST_TIME && current_state != SELECTING_NODE){ //1min
     broadcastNode();
     lastBroadcast = millis();
+  }
+  //Upload temperature to database every 5 minutes
+  if (millis() - lastSQLBroadcast > 300000 && WifiEnabled && current_state != SELECTING_NODE){
+    broadcastSQL();
+    lastSQLBroadcast = millis();
   }
 
   if (current_state!=prevState) {
@@ -363,20 +423,42 @@ int broadcastNode()
   //Transmit packet
   radio.clearDio1Action();
   RADIOLIB(radio.transmit(String(packetStr).c_str()));
-  both.printf("->Broadcasting To Network...\n");
+  //both.printf("->Broadcasting To Network...\n");
   if (_radiolib_status == RADIOLIB_ERR_NONE)
   {
     last_tx = millis();
     lastBroadcast=millis();
     radio.setDio1Action(rx);
     RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-    both.printf("->Broadcast OK\n");
+    //both.printf("->Broadcast OK\n");
     return 0;
   }else{
     both.printf("->Broadcast Fail :(\n");
     return -1;
   
   }
+}
+
+void broadcastSQL(){
+  both.printf("Broadcasting to Database\n");
+  temp = heltec_temperature();
+  // Create a cursor for the connection
+  MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+
+  // Insert data into the table
+  char query[128];
+  sprintf(query, "INSERT INTO nodeInfo (nodeID, temperature) VALUES (%llu, %f);", chipId, temp);
+  bool exec_status = cur_mem->execute(query);
+
+  // Delete the cursor to free up memory
+  delete cur_mem;
+
+  if (exec_status){
+    both.printf("Temperature uploaded to database\n");
+  }else{
+    both.printf("Failed to upload temperature to database\n");
+  }
+
 }
 
 int handlePacket(Packet packet){
