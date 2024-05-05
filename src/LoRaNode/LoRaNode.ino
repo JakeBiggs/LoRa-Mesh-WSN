@@ -56,7 +56,9 @@ enum State{
 std::map<uint64_t, NodeInfo> nodeList;
 const int MAX_HOPS = 1;
 unsigned long lastTimeoutCheck = 0;
+unsigned long BROADCAST_TIME = 30000;//300000; //5 minutes
 unsigned long lastBroadcast = 0;
+
 
 uint64_t chipId = 0;
 String rxdata; //Recieved data buffer
@@ -68,6 +70,12 @@ float temp;
 uint64_t last_tx = 0;
 uint64_t tx_time;
 uint64_t minimum_pause;
+
+State current_state = NORMAL;
+State prevState = NORMAL;
+static bool justSwitched = false;
+int currentNodeIndex = 0;
+int numNodes = 0;
 
 void setup() {
   // put your setup code here, to run once:
@@ -104,8 +112,7 @@ void setup() {
   chipId = getChipId();
   //Set up stuff
   unsigned long lastTimeoutCheck = millis();
-  unsigned long lastBroadcast = millis();
-  broadcastNode();
+  unsigned long lastBroadcast = -300000;
 
   // Start receiving
   RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
@@ -131,7 +138,7 @@ String createPacketStr(uint64_t senderId, uint64_t recvId, float temperature, in
   if (senderId != chipId){
     packet = String(String((uint64_t)senderId)+","+String((uint64_t)recvId)+","+String(temperature,1)+","+String(hopCount));
   }else{
-    String packet = String(ESP.getEfuseMac()) + "," + String((uint64_t)recvId) + "," + String(temperature,1) + "," + String(hopCount);
+    packet = String(ESP.getEfuseMac()) + "," + String((uint64_t)recvId) + "," + String(temperature,1) + "," + String(hopCount);
   }
   //sprintf(packetStr, "%llu,%llu,%.1f", senderId, recvId, temperature);
   return packet;
@@ -187,11 +194,11 @@ int broadcastNode()
 
   //Create packet
   //Receive ID of 0 its a broadcast
-  String packetStr = createPacketStr(chipId, 0, 0.0, 0);
+  String packetStr = createPacketStr(chipId, uint64_t(0), 0.0f, 0);
 
   //Transmit packet
   RADIOLIB(radio.transmit(String(packetStr).c_str()));
-  both.printf("\n->Broadcasting To Network...\n");
+  both.printf("->Broadcasting To Network...\n");
   if (_radiolib_status == RADIOLIB_ERR_NONE)
   {
     both.printf("\n->Broadcast OK\n");
@@ -206,23 +213,28 @@ int broadcastNode()
 int handlePacket(Packet packet){
   //Handle recieved packet
   //Returns 0 if successful, -1 if failed
-  if(packet.recieverId == 0){
+  if (packet.senderId == chipId && packet.recieverId != 0){
+    //ignore
+    both.printf("Recieved own packet that wasnt broadcast\n");
+    return 0;
+  }else if (packet.senderId == chipId && packet.recieverId == 0){
+    //Broadcast packet
+    both.printf("Recieved own broadcast packet\n");
+    return 0;
+  }
+  if(packet.recieverId == 0 && packet.senderId != chipId){
     updateNodeList(packet.senderId, radio.getRSSI());
   }
-  else if(packet.recieverId == chipId){
+  if(packet.recieverId == chipId){
     both.printf("RX From [%s]\n", String(packet.senderId).c_str());
     //both.printf("  RSSI: %.2f dBm\n", radio.getRSSI());
     //both.printf("  SNR: %.2f dB\n", radio.getSNR());
 
     both.printf("Temperature recieved: %.1f \n", packet.data);
   }
-  else if(packet.recieverId != chipId && packet.recieverId != 0){
-    both.printf(String("\nRecieved packet that wasnt meant for you").c_str());
-    //TODO: handle mesh routing
-  }
-  else{
-    both.printf("Error: Invalid packet\n");
-    return -1;
+  if(packet.recieverId != chipId && packet.recieverId != 0){
+    both.printf(String("\nRouting Packet...").c_str());
+    //routePacket(packet);
   }
   return 0;
 }
@@ -251,20 +263,21 @@ void removeTimeoutNodes(unsigned long timeout){
 
 void routePacket(Packet packet){
    //Routes a packet to the correct node
-  if (nodeList.find(packet.recieverId) != nodeList.end()){
-    //Node exists in list
-    if (packet.hopCount < MAX_HOPS){
-      //Packet has not reached maximum hops
-      packet.hopCount++;
-      both.printf("Routing packet to [%s]\n", String(packet.recieverId).c_str());
-      String packetStr = createPacketStr(packet.senderId, packet.recieverId, 0.0, packet.hopCount);
-      RADIOLIB(radio.transmit(String(packetStr).c_str()));
+  if (!nodeList.empty() && packet.recieverId != 0 && packet.recieverId != chipId && nodeList.find(packet.recieverId) != nodeList.end()){
+    if (nodeList.find(packet.recieverId) != nodeList.end()){
+      //Node exists in list
+      if (packet.hopCount < MAX_HOPS){
+        //Packet has not reached maximum hops
+        packet.hopCount++;
+        both.printf("Routing packet to [%s]\n", String(packet.recieverId).c_str());
+        String packetStr = createPacketStr(packet.senderId, packet.recieverId, packet.data, packet.hopCount);
+        RADIOLIB(radio.transmit(String(packetStr).c_str()));
 
-    }else{
-      both.printf("Packet has reached maximum hops, discarding\n");
+      }else{
+        both.printf("Packet has reached maximum hops, discarding\n");
+      }
     }
   }
-  
 }
 
 String getChipIdStr(){
@@ -290,8 +303,10 @@ void loop() {
   //Functions same as heltec_loop()
   button.update();
   #ifdef HELTEC_POWER_BUTTON
+
+
     // Power off button checking
-    if (button.pressedFor(1000)) {
+    if (button.pressedFor(10000)) {
       #ifndef HELTEC_NO_DISPLAY_INSTANCE
         // Visually confirm it's off so user releases button
         display.displayOff();
@@ -301,62 +316,125 @@ void loop() {
     }
   #endif
 
-  //TODO: Add maximum duty cycle limits?
-  if ((button.isSingleClick())){
-    temp = heltec_temperature();
-    both.printf("TX Temp: %.1f °C", temp);
-
-
-    radio.clearDio1Action();
-    heltec_led(50); //50% Brightness
-    tx_time = millis();
-    //Create packet
-    String packetStr = createPacketStr(chipId, 0, temp, 0);
-    //both.printf("\nPS->%s", packetStr.c_str());
-    //both.printf("\n->%llu,%llu,%.1f", packet.senderId, packet.recieverId, packet.data);
-    //delay(1000);
-    RADIOLIB(radio.transmit(String(packetStr).c_str()));
-    tx_time = millis() - tx_time;
-    heltec_led(0); //Turn off LED
-    if (_radiolib_status == RADIOLIB_ERR_NONE) {
-      both.printf("\n->TX OK (%i ms)\n", tx_time);
-    } else {
-      both.printf("\n->TX fail (%i)\n", _radiolib_status);
-    }
-
-    last_tx = millis();
-    radio.setDio1Action(rx);
+  if (current_state!=prevState) {
+    // State change
+    justSwitched = true;
+    prevState = current_state;
+   
+  }
   
-    RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-  }
-  //On packet recieved
-  if(rxFlag){
-    rxFlag = false;
-    rxDataLength = radio.getPacketLength();
-    //both.printf("\nRX Data Length: %i\n", rxDataLength);
-    
-    both.printf("Reading data...\n");
-    radio.readData(rxdata);
-    
-    //recvPacketCharArray[rxDataLength] = '\0'; //Null terminator
-    if (_radiolib_status == RADIOLIB_ERR_NONE){
-      //both.printf("RCV->%s\n", rxdata.c_str());
-      both.printf("Decoding Packet...\n");
-      Packet decodedPacket = decodePacket(rxdata);
+  switch(current_state){
+    case NORMAL:
+      //Normal operation
 
+      if (justSwitched){
+        display.clear();
+        both.printf("Waiting For Packets:\n");
+        display.display();
+        justSwitched = false;
+      }
+      if ((button.isDoubleClick())){
+        justSwitched = true;
+        current_state = SELECTING_NODE;
+      }
+      //On packet recieved
+      if(rxFlag){
+        rxFlag = false;
+        rxDataLength = radio.getPacketLength();
+        
+        both.printf("Reading data...\n");
+        radio.readData(rxdata);
+        
+        if (_radiolib_status == RADIOLIB_ERR_NONE){
+            if (!rxdata.isEmpty()){
+              both.printf("RCV->%s\n", rxdata.c_str());
+              both.printf("Decoding Packet...\n");
+              Packet decodedPacket = decodePacket(rxdata);
+              handlePacket(decodedPacket);
+              RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+          }
+        }
+      }
+      //Remove nodes that have not broadcasted 
+      if (millis() - lastTimeoutCheck > 120000){ //Check every 2 minutes
+        removeTimeoutNodes(900000); //Remove nodes that have not broadcasted in 15 minutes
+        lastTimeoutCheck = millis();
+      }
 
+      break;
+    case SELECTING_NODE:
+      //Selecting node to send data to
+      if (justSwitched){
+        display.clear();
+        temp = heltec_temperature();
+        both.printf("Select Node:     TMP:%f\n", temp);
+        for (const auto& node : nodeList){
+          both.printf("[%s]", String(node.second.nodeId).c_str());
+        }
+        justSwitched = false;
+        display.display();
+      }
+      
+      if ((button.isSingleClick())){
+        // Select node
+        display.clear();
+        if (!nodeList.empty()){
+          int i = 0;
+          for (const auto& node : nodeList){
+            if (i == currentNodeIndex){
+              both.printf("[%s]\n ", String(node.first).c_str());
+            } else {
+              both.printf("%s \n", String(node.first).c_str());
+            }
+            i++;
+          }
+          currentNodeIndex = (currentNodeIndex + 1) % nodeList.size();
+        }else{
+          both.printf("No nodes in network\n");
+        }
+        display.display();
+      }
 
-      RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-    }
-  }
-  //Remove nodes that have not broadcasted 
-  if (millis() - lastTimeoutCheck > 120000){ //Check every 2 minutes
-    removeTimeoutNodes(900000); //Remove nodes that have not broadcasted in 15 minutes
-    lastTimeoutCheck = millis();
+      ///TODO: Add maximum duty cycle limits?
+      if ((button.isDoubleClick())){
+        //Send data to selected node
+        display.clear();
+        if (!nodeList.empty()){
+          auto it = nodeList.begin();
+          std::advance(it, currentNodeIndex);
+          both.printf("\nSending Data to [%s]\n", String(it->first).c_str());
+          radio.clearDio1Action();
+          heltec_led(50); //50% Brightness
+          tx_time = millis();
+          //Create packet
+          String packetStr = createPacketStr(chipId, it->first, temp, 0);
+
+          RADIOLIB(radio.transmit(String(packetStr).c_str()));
+          tx_time = millis() - tx_time;
+          heltec_led(0); //Turn off LED
+          if (_radiolib_status == RADIOLIB_ERR_NONE) {
+            both.printf("\n->TX OK (%i ms)\n", tx_time);
+          } else {
+            both.printf("\n->TX fail (%i)\n", _radiolib_status);
+          }
+
+          last_tx = millis();
+          radio.setDio1Action(rx);
+        
+          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+        }
+        delay(100);
+        justSwitched = true;
+        current_state = NORMAL;
+      }
+      break;
+    case SLEEP:
+      //Sleeping
+      break;
   }
   
   //Broadcast node every 5 minutes
-  if (millis() - lastBroadcast > 300000){
+  if (millis() - lastBroadcast > BROADCAST_TIME){ //5 minutes
     broadcastNode();
     lastBroadcast = millis();
   }
