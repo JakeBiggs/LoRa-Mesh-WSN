@@ -56,8 +56,9 @@ enum State{
 std::map<uint64_t, NodeInfo> nodeList;
 const int MAX_HOPS = 1;
 unsigned long lastTimeoutCheck = 0;
-unsigned long BROADCAST_TIME = 30000;//300000; //5 minutes
+unsigned long BROADCAST_TIME = 60000;//1 minute    300000; //5 minutes
 unsigned long lastBroadcast = 0;
+bool firstLoop;
 
 
 uint64_t chipId = 0;
@@ -78,8 +79,10 @@ int currentNodeIndex = 0;
 int numNodes = 0;
 
 void setup() {
+  heltec_setup();
+  Serial.println(); 
   // put your setup code here, to run once:
-
+  /*
   //Same as heltec_setup()
   Serial.begin(115200);
   #ifndef HELTEC_NO_DISPLAY_INSTANCE
@@ -88,7 +91,11 @@ void setup() {
     display.setContrast(255);
     display.flipScreenVertically();
   #endif
-  
+  */
+
+  display.init();
+  display.flipScreenVertically();
+  display.setFont(ArialMT_Plain_10);  
   //Initialise Radio
   both.println("Radio Initialising...");
   RADIOLIB_OR_HALT(radio.begin());
@@ -104,10 +111,13 @@ void setup() {
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(SPREADING_FACTOR));
   both.printf("TX power: %i dBm\n", TRANSMIT_POWER);
   RADIOLIB_OR_HALT(radio.setOutputPower(TRANSMIT_POWER));
+  delay(1000);
+  display.cls();
   //Initialise Temperature
   temp = heltec_temperature();
-  both.printf("Initial Temperature: %.1f °C\n", temp);
-
+  both.printf("Current Temp: %.1f °C\n", temp);
+  both.printf("Packet Log:\n");
+  display.display();
   //Get chip ID
   chipId = getChipId();
   //Set up stuff
@@ -116,7 +126,163 @@ void setup() {
 
   // Start receiving
   RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+  firstLoop = true;
+}
 
+void loop() {
+  //updates the state of the power button and implements long-press power off if used.
+  //Functions same as heltec_loop()
+  button.update();
+  #ifdef HELTEC_POWER_BUTTON
+
+
+    // Power off button checking
+    if (button.pressedFor(50000)) {
+      #ifndef HELTEC_NO_DISPLAY_INSTANCE
+        // Visually confirm it's off so user releases button
+        display.displayOff();
+      #endif
+      // Deep sleep (has wait for release so we don't wake up immediately)
+      heltec_deep_sleep();
+    }
+  #endif
+
+  if(firstLoop){
+    broadcastNode();
+    firstLoop=false;
+  }
+
+  //Broadcast node every 1 minute
+  if (millis() - lastBroadcast > BROADCAST_TIME && current_state != SELECTING_NODE){ //1min
+    broadcastNode();
+    lastBroadcast = millis();
+  }
+
+  if (current_state!=prevState) {
+    // State change
+    justSwitched = true;
+    prevState = current_state;
+   
+  }
+  
+  switch(current_state){
+    case NORMAL:
+      //Normal operation
+
+      if (justSwitched){
+        radio.setDio1Action(rx);
+        RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+        clearDisplay();
+        temp = heltec_temperature();
+        both.printf("Current Temp: %.1f °C\n", temp);
+        both.printf("Packet Log:\n");
+        justSwitched = false;
+      }
+      if ((button.isDoubleClick())){
+        justSwitched = true;
+        current_state = SELECTING_NODE;
+      }
+
+      //On packet recieved
+      if(rxFlag){
+        rxFlag = false;
+        rxDataLength = radio.getPacketLength();
+        
+        both.printf("Reading data...\n");
+        radio.readData(rxdata);
+        
+        if (_radiolib_status == RADIOLIB_ERR_NONE){
+            if (!rxdata.isEmpty()){
+              //both.printf("RCV->%s\n", rxdata.c_str());
+              //both.printf("Decoding Packet...\n");
+              Packet decodedPacket = decodePacket(rxdata);
+              handlePacket(decodedPacket);
+          }
+          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+        }
+      }
+      //Remove nodes that have not broadcasted 
+      if (millis() - lastTimeoutCheck > 120000){ //Check every 2 minutes
+        removeTimeoutNodes(900000); //Remove nodes that have not broadcasted in 15 minutes
+        lastTimeoutCheck = millis();
+      }
+
+      break;
+    case SELECTING_NODE:
+      //Selecting node to send data to
+      if (justSwitched){
+        clearDisplay();
+        temp = heltec_temperature();
+        both.printf("Select Node:     TMP:%f\n", temp);
+        for (const auto& node : nodeList){
+          both.printf("%s\n", String(node.second.nodeId).c_str());
+        }
+        justSwitched = false;
+        display.display();
+      }
+      
+      if ((button.isSingleClick())){
+        // Select node
+        clearDisplay();
+        both.printf("Select Node:     TMP:%f\n", temp);
+        if (!nodeList.empty()){
+          int i = 0;
+          for (const auto& node : nodeList){
+            if (i == currentNodeIndex){
+              both.printf("->%s\n ", String(node.first).c_str());
+            } else {
+              both.printf("%s \n", String(node.first).c_str());
+            }
+            i++;
+          }
+          currentNodeIndex = (currentNodeIndex + 1) % nodeList.size();
+        }else{
+          both.printf("No nodes in network\n");
+        }
+        display.display();
+      }
+
+      ///TODO: Add maximum duty cycle limits?
+      if ((button.isDoubleClick())){
+        //Send data to selected node
+        clearDisplay();
+        if (!nodeList.empty()){
+          auto it = nodeList.begin();
+          std::advance(it, currentNodeIndex);
+          both.printf("\nSending Data to: \n[%s]\n", String(it->first).c_str());
+          radio.clearDio1Action();
+          heltec_led(50); //50% Brightness
+          tx_time = millis();
+          //Create packet
+          String packetStr = createPacketStr(chipId, it->first, temp, 0);
+
+          RADIOLIB(radio.transmit(String(packetStr).c_str()));
+          tx_time = millis() - tx_time;
+          heltec_led(0); //Turn off LED
+          if (_radiolib_status == RADIOLIB_ERR_NONE) {
+            both.printf("\n->TX OK (%i ms)\n", tx_time);
+          } else {
+            both.printf("\n->TX fail (%i)\n", _radiolib_status);
+          }
+
+          last_tx = millis();
+          radio.setDio1Action(rx);
+        
+          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+        }{
+          both.printf("Returning to Log...\n");
+        }
+        delay(1000);
+        justSwitched = true;
+        current_state = NORMAL;
+      }
+      break;
+    case SLEEP:
+      //Sleeping
+      break;
+  }
+  
+  
 }
 
 void rx(){
@@ -195,14 +361,19 @@ int broadcastNode()
   String packetStr = createPacketStr(chipId, uint64_t(0), 0.0f, 0);
 
   //Transmit packet
+  radio.clearDio1Action();
   RADIOLIB(radio.transmit(String(packetStr).c_str()));
   both.printf("->Broadcasting To Network...\n");
   if (_radiolib_status == RADIOLIB_ERR_NONE)
   {
-    both.printf("\n->Broadcast OK\n");
+    last_tx = millis();
+    lastBroadcast=millis();
+    radio.setDio1Action(rx);
+    RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+    both.printf("->Broadcast OK\n");
     return 0;
   }else{
-    both.printf("\n->Broadcast Fail :(\n");
+    both.printf("->Broadcast Fail :(\n");
     return -1;
   
   }
@@ -298,147 +469,11 @@ uint64_t getChipId(){
   return chipId;
 }
 
-
-
-void loop() {
-  //updates the state of the power button and implements long-press power off if used.
-  //Functions same as heltec_loop()
-  button.update();
-  #ifdef HELTEC_POWER_BUTTON
-
-
-    // Power off button checking
-    if (button.pressedFor(10000)) {
-      #ifndef HELTEC_NO_DISPLAY_INSTANCE
-        // Visually confirm it's off so user releases button
-        display.displayOff();
-      #endif
-      // Deep sleep (has wait for release so we don't wake up immediately)
-      heltec_deep_sleep();
-    }
-  #endif
-
-  if (current_state!=prevState) {
-    // State change
-    justSwitched = true;
-    prevState = current_state;
-   
-  }
-  
-  switch(current_state){
-    case NORMAL:
-      //Normal operation
-
-      if (justSwitched){
-        display.clear();
-        both.printf("Waiting For Packets:\n");
-        display.display();
-        justSwitched = false;
-      }
-      if ((button.isDoubleClick())){
-        justSwitched = true;
-        current_state = SELECTING_NODE;
-      }
-      //On packet recieved
-      if(rxFlag){
-        rxFlag = false;
-        rxDataLength = radio.getPacketLength();
-        
-        both.printf("Reading data...\n");
-        radio.readData(rxdata);
-        
-        if (_radiolib_status == RADIOLIB_ERR_NONE){
-            if (!rxdata.isEmpty()){
-              //both.printf("RCV->%s\n", rxdata.c_str());
-              //both.printf("Decoding Packet...\n");
-              Packet decodedPacket = decodePacket(rxdata);
-              handlePacket(decodedPacket);
-          }
-          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-        }
-      }
-      //Remove nodes that have not broadcasted 
-      if (millis() - lastTimeoutCheck > 120000){ //Check every 2 minutes
-        removeTimeoutNodes(900000); //Remove nodes that have not broadcasted in 15 minutes
-        lastTimeoutCheck = millis();
-      }
-
-      break;
-    case SELECTING_NODE:
-      //Selecting node to send data to
-      if (justSwitched){
-        display.clear();
-        temp = heltec_temperature();
-        both.printf("Select Node:     TMP:%f\n", temp);
-        for (const auto& node : nodeList){
-          both.printf("[%s]", String(node.second.nodeId).c_str());
-        }
-        justSwitched = false;
-        display.display();
-      }
-      
-      if ((button.isSingleClick())){
-        // Select node
-        display.clear();
-        if (!nodeList.empty()){
-          int i = 0;
-          for (const auto& node : nodeList){
-            if (i == currentNodeIndex){
-              both.printf("[%s]\n ", String(node.first).c_str());
-            } else {
-              both.printf("%s \n", String(node.first).c_str());
-            }
-            i++;
-          }
-          currentNodeIndex = (currentNodeIndex + 1) % nodeList.size();
-        }else{
-          both.printf("No nodes in network\n");
-        }
-        display.display();
-      }
-
-      ///TODO: Add maximum duty cycle limits?
-      if ((button.isDoubleClick())){
-        //Send data to selected node
-        display.clear();
-        if (!nodeList.empty()){
-          auto it = nodeList.begin();
-          std::advance(it, currentNodeIndex);
-          both.printf("\nSending Data to [%s]\n", String(it->first).c_str());
-          radio.clearDio1Action();
-          heltec_led(50); //50% Brightness
-          tx_time = millis();
-          //Create packet
-          String packetStr = createPacketStr(chipId, it->first, temp, 0);
-
-          RADIOLIB(radio.transmit(String(packetStr).c_str()));
-          tx_time = millis() - tx_time;
-          heltec_led(0); //Turn off LED
-          if (_radiolib_status == RADIOLIB_ERR_NONE) {
-            both.printf("\n->TX OK (%i ms)\n", tx_time);
-          } else {
-            both.printf("\n->TX fail (%i)\n", _radiolib_status);
-          }
-
-          last_tx = millis();
-          radio.setDio1Action(rx);
-        
-          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
-        }
-        delay(100);
-        justSwitched = true;
-        current_state = NORMAL;
-      }
-      break;
-    case SLEEP:
-      //Sleeping
-      break;
-  }
-  
-  //Broadcast node every 5 minutes
-  if (millis() - lastBroadcast > BROADCAST_TIME){ //5 minutes
-    broadcastNode();
-    lastBroadcast = millis();
-  }
+//Clears display and updates
+void clearDisplay(){
+  display.cls();
+  display.clear();
+  display.display();
 }
+
 
