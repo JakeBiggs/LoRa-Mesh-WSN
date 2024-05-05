@@ -135,11 +135,9 @@ Packet createPacket(uint64_t recvId, float data){
 String createPacketStr(uint64_t senderId, uint64_t recvId, float temperature, int hopCount){
   //char packetStr[256];
   String packet;
-  if (senderId != chipId){
-    packet = String(String((uint64_t)senderId)+","+String((uint64_t)recvId)+","+String(temperature,1)+","+String(hopCount));
-  }else{
-    packet = String(ESP.getEfuseMac()) + "," + String((uint64_t)recvId) + "," + String(temperature,1) + "," + String(hopCount);
-  }
+
+  packet = String(String((uint64_t)senderId)+","+String((uint64_t)recvId)+","+String(temperature,1)+","+String(hopCount));
+  
   //sprintf(packetStr, "%llu,%llu,%.1f", senderId, recvId, temperature);
   return packet;
 }
@@ -215,15 +213,16 @@ int handlePacket(Packet packet){
   //Returns 0 if successful, -1 if failed
   if (packet.senderId == chipId && packet.recieverId != 0){
     //ignore
-    both.printf("Recieved own packet that wasnt broadcast\n");
+    //both.printf("Recieved own packet that wasnt broadcast\n");
     return 0;
   }else if (packet.senderId == chipId && packet.recieverId == 0){
     //Broadcast packet
-    both.printf("Recieved own broadcast packet\n");
+    //both.printf("Recieved own broadcast packet\n");
     return 0;
   }
   if(packet.recieverId == 0 && packet.senderId != chipId){
     updateNodeList(packet.senderId, radio.getRSSI());
+    return 0;
   }
   if(packet.recieverId == chipId){
     both.printf("RX From [%s]\n", String(packet.senderId).c_str());
@@ -231,10 +230,13 @@ int handlePacket(Packet packet){
     //both.printf("  SNR: %.2f dB\n", radio.getSNR());
 
     both.printf("Temperature recieved: %.1f \n", packet.data);
+    return 0;
   }
   if(packet.recieverId != chipId && packet.recieverId != 0){
     both.printf(String("\nRouting Packet...").c_str());
+    
     //routePacket(packet);
+    return 0;
   }
   return 0;
 }
@@ -347,12 +349,12 @@ void loop() {
         
         if (_radiolib_status == RADIOLIB_ERR_NONE){
             if (!rxdata.isEmpty()){
-              both.printf("RCV->%s\n", rxdata.c_str());
-              both.printf("Decoding Packet...\n");
+              //both.printf("RCV->%s\n", rxdata.c_str());
+              //both.printf("Decoding Packet...\n");
               Packet decodedPacket = decodePacket(rxdata);
               handlePacket(decodedPacket);
-              RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
           }
+          RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
         }
       }
       //Remove nodes that have not broadcasted 
