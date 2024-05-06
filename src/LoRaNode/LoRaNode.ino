@@ -8,20 +8,32 @@ Using unofficial Heltec LoRa Library found at: https://github.com/ropg/Heltec_ES
 #include <heltec_unofficial.h>
 #include <map>
 #include <WiFi.h>
-#include <MySQL_Connection.h>
-#include <MySQL_Cursor.h>
+//#include <MySQL_Connection.h>
+//#include <MySQL_Cursor.h>
+#include <MySQL.h>
 //Set your SSID and Password Here:
-const char* ssid = "BT-9FF9SJ";
-const char* password = "MtJKQTaF7RhfcX";
+const char* ssid = "XXXXX";
+const char* password = "XXXXX";
 bool WifiEnabled = 1; //Disable wifi here
 
 //Define MySQL login and password
 WiFiClient client;
-MySQL_Connection conn((Client*)&client);
+//MySQL_Connection conn((Client*)&client);
+const char* user = "lora";                   // MySQL user login username
+const char* pass = "XXXXX";           // MySQL user login password
+const char* dbHost = "XXXX";            // MySQL hostname or IP address
+const char* database = "loradata";         // Database name
+const char* table = "nodeInfo";               // Table name
+uint16_t dbPort = 3306;                        // MySQL host port
+uint32_t pollTime = 5000;  
+MySQL sql(&client, dbHost, dbPort);
+#define MAX_QUERY_LEN 128
+
 bool SQL_connection_status;
-char user[] = "lora";
-char pass[] = "123";
-char db[] = "loradata";
+//char* usera = "lora";
+//char* pass = "1234";
+char* db = "loradata";
+
 // Pause between transmited packets in seconds.
 // Set to zero to only transmit a packet when pressing the user button
 // Will not exceed 1% duty cycle, even if you set a lower value.
@@ -141,17 +153,18 @@ void setup() {
     }
     
     if (WiFi.status() == WL_CONNECTED){
-      both.print("\nConnected to Wifi\n");  
+      both.print("\nConnected:\n" + String(WiFi.localIP().toString()+"\n"));  
       // Connect to MySQL
-      both.print("Connecting to MySQL Server...");
-      IPAddress server_addr(192,168,1,148);  // IP of the MySQL *server* here
+   //   both.print("Connecting to "+ dbHost);
+      //IPAddress server_addr(192,168,1,148);  // IP of the MySQL *server* here
 
       delay(500);
-      if (conn.connect(server_addr, 3306, user, pass)) {
+      if (sql.connect(user,pass, database)){//conn.connect(server_addr, 3306, user, pass)) {
         delay(1000);
+        
         both.print("Connected to MySQL\n");
         //Create a cursor
-        MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+        //MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
         SQL_connection_status = true;
         delay(2000);
 
@@ -201,6 +214,9 @@ void loop() {
 
   if(firstLoop){
     broadcastNode();
+    if (SQL_connection_status){
+      display.print("SQL Connected\n");
+    }
     if (WifiEnabled && SQL_connection_status){
       broadcastSQL();
     }
@@ -439,27 +455,60 @@ int broadcastNode()
   }
 }
 
-void broadcastSQL(){
-  both.printf("Broadcasting to Database\n");
+static const char insertQuery[] PROGMEM = R"string_literal(
+INSERT INTO `%s`
+  (`MAC address`, `CPU0 reset reason`, `CPU1 reset reason`)
+  VALUES ('%s', '%s', '%s');
+)string_literal";
+
+// Variadic function that will execute the query selected with passed parameters
+bool queryExecute(DataQuery_t& data, const char* queryStr, ...) {
+  if (sql.connected()) {
+    char buf[MAX_QUERY_LEN];
+    va_list args;
+    va_start (args, queryStr);
+    vsnprintf (buf, sizeof(buf), queryStr, args);
+    va_end (args);
+
+    Serial.printf("Executing SQL query: %s\n", buf);
+    // Execute the query
+    return sql.query(data, buf);
+  }
+  return false;
+}
+
+DataQuery_t broadcastSQL(){
+  both.printf("Broadcasting to Database...\n");
   temp = heltec_temperature();
+  DataQuery_t data;
+  if (queryExecute(data,"INSERT INTO nodeinfo (nodeID, temp) VALUES (%llu, %f);", chipId, temp)){
+    display.print("Data Inserted to SQL.\n");
+    //sql.printResult(data, display);
+    return data;
+  }else{
+    display.print("Data Insert Failed");
+    return data;
+  }
+  
+}
+
   // Create a cursor for the connection
-  MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+  //MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
 
   // Insert data into the table
-  char query[128];
-  sprintf(query, "INSERT INTO nodeInfo (nodeID, temperature) VALUES (%llu, %f);", chipId, temp);
-  bool exec_status = cur_mem->execute(query);
+  //char query[128];
+  //sprintf(query, "INSERT INTO nodeInfo (nodeID, temperature) VALUES (%llu, %f);", chipId, temp);
+  //bool exec_status = cur_mem->execute(query);
 
   // Delete the cursor to free up memory
-  delete cur_mem;
+  //delete cur_mem;
 
-  if (exec_status){
-    both.printf("Temperature uploaded to database\n");
-  }else{
-    both.printf("Failed to upload temperature to database\n");
-  }
+  //if (//exec_status){
+    //both.printf("Temperature uploaded to database\n");
+  //}else{
+    //both.printf("Failed to upload temperature to database\n");
+  //}
 
-}
 
 int handlePacket(Packet packet){
   //Handle recieved packet
