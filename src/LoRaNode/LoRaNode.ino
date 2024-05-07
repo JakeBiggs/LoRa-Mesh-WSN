@@ -11,28 +11,14 @@ Using unofficial Heltec LoRa Library found at: https://github.com/ropg/Heltec_ES
 //#include <MySQL_Connection.h>
 //#include <MySQL_Cursor.h>
 #include <MySQL.h>
-//Set your SSID and Password Here:
-const char* ssid = "XXXXX";
-const char* password = "XXXXX";
-bool WifiEnabled = 1; //Disable wifi here
+#include "secrets.h"
+bool WifiEnabled = 0; //Disable wifi here, 1 for gatewat node 0 for end node,
 
-//Define MySQL login and password
+
 WiFiClient client;
-//MySQL_Connection conn((Client*)&client);
-const char* user = "lora";                   // MySQL user login username
-const char* pass = "XXXXX";           // MySQL user login password
-const char* dbHost = "XXXX";            // MySQL hostname or IP address
-const char* database = "loradata";         // Database name
-const char* table = "nodeInfo";               // Table name
-uint16_t dbPort = 3306;                        // MySQL host port
-uint32_t pollTime = 5000;  
 MySQL sql(&client, dbHost, dbPort);
 #define MAX_QUERY_LEN 128
-
 bool SQL_connection_status;
-//char* usera = "lora";
-//char* pass = "1234";
-char* db = "loradata";
 
 // Pause between transmited packets in seconds.
 // Set to zero to only transmit a packet when pressing the user button
@@ -71,6 +57,7 @@ struct NodeInfo{
   uint64_t nodeId;
   float rssi;
   unsigned long lastBroadcastTime;
+  bool gatewayNode;
 };
 
 enum State{
@@ -106,91 +93,130 @@ static bool justSwitched = false;
 int currentNodeIndex = 0;
 int numNodes = 0;
 
-void setup() {
-  heltec_setup();
-  Serial.println(); 
-  // put your setup code here, to run once:
-  /*
-  //Same as heltec_setup()
-  Serial.begin(115200);
-  #ifndef HELTEC_NO_DISPLAY_INSTANCE
-    heltec_display_power(true);
-    display.init();
-    display.setContrast(255);
-    display.flipScreenVertically();
-  #endif
-  */
+void drawProgressBar(int current, int total, String label) {
+  int progress = (current * 100) / total;
+  // draw the progress bar
+  display.cls();
+  display.drawProgressBar(0, 32, 120, 10, progress);
 
-  
+  // draw the percentage as String
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  //display.drawString(64, 15, String(progress) + "%");
+  display.drawString(64, 15, label);
+  display.display();
+}
+
+void setup() {
+  //For progress bar
+  int totalSteps = 8;
+  if (WifiEnabled){
+    totalSteps += 3;
+  }
+  int currentStep = 0;
+  heltec_setup();
+  Serial.println();  
   display.init();
   display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);  
   //Initialise Radio
-  both.println("Radio Initialising...");
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "Radio Initialising...");
+  //both.println("Radio Initialising...");
   RADIOLIB_OR_HALT(radio.begin());
   //Set the callback function for recieved packets
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "Setting Callback Function...");
   radio.setDio1Action(rx);
 
   //Set radio parameters
-  both.printf("Frequency: %.2f MHz\n", FREQUENCY);
+  //both.printf("Frequency: %.2f MHz\n", FREQUENCY);
   RADIOLIB_OR_HALT(radio.setFrequency(FREQUENCY));
-  both.printf("Bandwidth: %.1f kHz\n", BANDWIDTH);
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "Frequency: " + String(FREQUENCY) + " MHz");
+  //both.printf("Bandwidth: %.1f kHz\n", BANDWIDTH);
   RADIOLIB_OR_HALT(radio.setBandwidth(BANDWIDTH));
-  both.printf("Spreading Factor: %i\n", SPREADING_FACTOR);
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "Bandwidth: " + String(BANDWIDTH) + " kHz");
+  //both.printf("Spreading Factor: %i\n", SPREADING_FACTOR);
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(SPREADING_FACTOR));
-  both.printf("TX power: %i dBm\n", TRANSMIT_POWER);
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "Spreading Factor: " + String(SPREADING_FACTOR));
+  //both.printf("TX power: %i dBm\n", TRANSMIT_POWER);
   RADIOLIB_OR_HALT(radio.setOutputPower(TRANSMIT_POWER));
-  delay(1000);
-  display.cls();
+  currentStep++;
+  delay(500);
+  drawProgressBar(currentStep, totalSteps, "TX power: " + String(TRANSMIT_POWER) + " dBm");
+  //display.cls();
 
   if (WifiEnabled){
     // Connect to WiFi
-    both.print("Connecting to Wifi...\n");
+    //both.print("Connecting to Wifi...\n");
+    
     WiFi.begin(ssid, password);
+    currentStep++;
+    delay(500);
+    drawProgressBar(currentStep, totalSteps, "Connecting to Wifi...");
     while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      both.print(".");
+      delay(100);
+      //both.print(".");
     }
     
     if (WiFi.status() == WL_CONNECTED){
-      both.print("\nConnected:\n" + String(WiFi.localIP().toString()+"\n"));  
+      currentStep++;  
+      delay(500);
+      drawProgressBar(currentStep, totalSteps, "Connecting to MySQL...");
+      //both.print("\nConnected:\n" + String(WiFi.localIP().toString()+"\n"));  
       // Connect to MySQL
    //   both.print("Connecting to "+ dbHost);
       //IPAddress server_addr(192,168,1,148);  // IP of the MySQL *server* here
 
-      delay(500);
       if (sql.connect(user,pass, database)){//conn.connect(server_addr, 3306, user, pass)) {
-        delay(1000);
-        
-        both.print("Connected to MySQL\n");
+        //delay(1000);
+        currentStep++;
+        drawProgressBar(currentStep, totalSteps, "Connected to MySQL...");
+        //both.print("Connected to MySQL\n");
         //Create a cursor
         //MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
         SQL_connection_status = true;
-        delay(2000);
 
       } else {
-        both.print("Connection failed.\n");
+        currentStep++;
+        drawProgressBar(currentStep, totalSteps, "Failed to connect to MySQL...");
+        //both.print("Connection failed.\n");
         SQL_connection_status = false;
-        delay(3000);
+        delay(2000);
       }
       
     }
   } 
-  delay(2000);
-  clearDisplay();
+  
+  //Get chip ID
+  currentStep++;
+  drawProgressBar(currentStep, totalSteps, "Getting Chip ID...");
+  chipId = getChipId();
+  delay(500);
   //Initialise Temperature
   temp = heltec_temperature();
+  
+  //Set up timed stuff
+  unsigned long lastTimeoutCheck = millis();
+  unsigned long lastBroadcast = millis();
+
+  // Start receiving
+  currentStep++;
+  drawProgressBar(currentStep, totalSteps, "Starting Receive...");
+  RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
+  delay(1000);
+  clearDisplay();
+  
   both.printf("Current Temp: %.1f °C\n", temp);
   both.printf("Packet Log:\n");
   display.display();
-  //Get chip ID
-  chipId = getChipId();
-  //Set up stuff
-  unsigned long lastTimeoutCheck = millis();
-  unsigned long lastBroadcast = -300000;
-
-  // Start receiving
-  RADIOLIB_OR_HALT(radio.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF));
   firstLoop = true;
 }
 
@@ -214,11 +240,8 @@ void loop() {
 
   if(firstLoop){
     broadcastNode();
-    if (SQL_connection_status){
-      display.print("SQL Connected\n");
-    }
     if (WifiEnabled && SQL_connection_status){
-      broadcastSQL();
+      insertToSQL(chipId, temp);
     }
     firstLoop=false;
   }
@@ -230,7 +253,8 @@ void loop() {
   }
   //Upload temperature to database every 5 minutes
   if (millis() - lastSQLBroadcast > 300000 && WifiEnabled && current_state != SELECTING_NODE){
-    broadcastSQL();
+    temp = heltec_temperature();
+    insertToSQL(chipId, temp);
     lastSQLBroadcast = millis();
   }
 
@@ -434,7 +458,11 @@ int broadcastNode()
 
   //Create packet
   //Receive ID of 0 its a broadcast
-  String packetStr = createPacketStr(chipId, uint64_t(0), 0.0f, 0);
+  float data = 0.0f;
+  if (WifiEnabled && SQL_connection_status){
+    data = 1.0f; //Node is a gateway node
+  }
+  String packetStr = createPacketStr(chipId, uint64_t(0), data, 0);
 
   //Transmit packet
   radio.clearDio1Action();
@@ -455,12 +483,6 @@ int broadcastNode()
   }
 }
 
-static const char insertQuery[] PROGMEM = R"string_literal(
-INSERT INTO `%s`
-  (`MAC address`, `CPU0 reset reason`, `CPU1 reset reason`)
-  VALUES ('%s', '%s', '%s');
-)string_literal";
-
 // Variadic function that will execute the query selected with passed parameters
 bool queryExecute(DataQuery_t& data, const char* queryStr, ...) {
   if (sql.connected()) {
@@ -477,11 +499,10 @@ bool queryExecute(DataQuery_t& data, const char* queryStr, ...) {
   return false;
 }
 
-DataQuery_t broadcastSQL(){
-  both.printf("Broadcasting to Database...\n");
-  temp = heltec_temperature();
+DataQuery_t insertToSQL(uint64_t NodeId, float temp){
+  both.printf("Uploading to Database...\n");
   DataQuery_t data;
-  if (queryExecute(data,"INSERT INTO nodeinfo (nodeID, temp) VALUES (%llu, %f);", chipId, temp)){
+  if (queryExecute(data,"INSERT INTO nodeinfo (nodeID, temp) VALUES (%llu, %f);", NodeId, temp)){
     display.print("Data Inserted to SQL.\n");
     //sql.printResult(data, display);
     return data;
@@ -492,22 +513,26 @@ DataQuery_t broadcastSQL(){
   
 }
 
-  // Create a cursor for the connection
-  //MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+void updateNodeList(uint64_t nodeId, float rssi, bool isGatewayNode = false){
+  //Updates the list of nodes in the network
+  NodeInfo node;
+  node.nodeId = nodeId;
+  node.rssi = rssi;
+  node.lastBroadcastTime = millis();
+  node.gatewayNode = isGatewayNode;
+  //Add node to list or overwrite existing node info
+  nodeList[nodeId] = node;
+}
 
-  // Insert data into the table
-  //char query[128];
-  //sprintf(query, "INSERT INTO nodeInfo (nodeID, temperature) VALUES (%llu, %f);", chipId, temp);
-  //bool exec_status = cur_mem->execute(query);
-
-  // Delete the cursor to free up memory
-  //delete cur_mem;
-
-  //if (//exec_status){
-    //both.printf("Temperature uploaded to database\n");
-  //}else{
-    //both.printf("Failed to upload temperature to database\n");
-  //}
+NodeInfo* findNode(uint64_t nodeId){
+  //Finds a node in the list
+  auto it = nodeList.find(nodeId);
+  if (it != nodeList.end()){
+    return &(it->second); //Return pointer to node info 
+  }else{
+    return nullptr;
+  }
+}
 
 
 int handlePacket(Packet packet){
@@ -523,36 +548,42 @@ int handlePacket(Packet packet){
     return 0;
   }
   if(packet.recieverId == 0 && packet.senderId != chipId){
-    updateNodeList(packet.senderId, radio.getRSSI());
+    bool isGateway = (packet.data == 1.0);//static_cast<bool>(packet.data); 
+    updateNodeList(packet.senderId, radio.getRSSI(), isGateway);
     return 0;
   }
   if(packet.recieverId == chipId){
     both.printf("RX From [%s]\n", String(packet.senderId).c_str());
-    //both.printf("  RSSI: %.2f dBm\n", radio.getRSSI());
-    //both.printf("  SNR: %.2f dB\n", radio.getSNR());
-
     both.printf("Temperature recieved: %.1f \n", packet.data);
+    NodeInfo* senderNode = findNode(packet.senderId);
+
+    //If sender node is not in list, add it
+    if(!senderNode){
+      updateNodeList(packet.senderId, radio.getRSSI(), false); //Assume not a gateway node until told otherwise
+      senderNode = findNode(packet.senderId);
+    }
+    
+    //If we are a gateway, and the sender is not a gateway, insert to database
+    if (WifiEnabled && SQL_connection_status && !senderNode->gatewayNode){
+      both.printf("Inserting To Database...\n");
+      insertToSQL(packet.senderId, packet.data);
+    }
+    
     return 0;
+
   }
   if(packet.recieverId != chipId && packet.recieverId != 0){
     both.printf(String("\nRouting Packet...").c_str());
-    
+
+
+
     //routePacket(packet);
     return 0;
   }
   return 0;
 }
 
-void updateNodeList(uint64_t nodeId, float rssi){
-  //Updates the list of nodes in the network
-  NodeInfo node;
-  node.nodeId = nodeId;
-  node.rssi = rssi;
-  node.lastBroadcastTime = millis();
 
-  //Add node to list or overwrite existing node info
-  nodeList[nodeId] = node;
-}
 
 void removeTimeoutNodes(unsigned long timeout){
   //Removes nodes from the list that have not broadcasted in a while
@@ -568,18 +599,16 @@ void removeTimeoutNodes(unsigned long timeout){
 void routePacket(Packet packet){
    //Routes a packet to the correct node
   if (!nodeList.empty() && packet.recieverId != 0 && packet.recieverId != chipId && nodeList.find(packet.recieverId) != nodeList.end()){
-    if (nodeList.find(packet.recieverId) != nodeList.end()){
-      //Node exists in list
-      if (packet.hopCount < MAX_HOPS){
-        //Packet has not reached maximum hops
-        packet.hopCount++;
-        both.printf("Routing packet to [%s]\n", String(packet.recieverId).c_str());
-        String packetStr = createPacketStr(packet.senderId, packet.recieverId, packet.data, packet.hopCount);
-        RADIOLIB(radio.transmit(String(packetStr).c_str()));
+    //Node exists in list and needs to be routed
+    if (packet.hopCount < MAX_HOPS){
+      //Packet has not reached maximum hops
+      packet.hopCount++;
+      both.printf("Routing packet to [%s]\n", String(packet.recieverId).c_str());
+      String packetStr = createPacketStr(packet.senderId, packet.recieverId, packet.data, packet.hopCount);
+      RADIOLIB(radio.transmit(String(packetStr).c_str()));
 
-      }else{
-        both.printf("Packet has reached maximum hops, discarding\n");
-      }
+    }else{
+      both.printf("Packet has reached maximum hops, discarding\n");
     }
   }
 }
